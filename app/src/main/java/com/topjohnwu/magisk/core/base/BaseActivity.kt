@@ -1,19 +1,32 @@
 package com.topjohnwu.magisk.core.base
 
+import android.Manifest.permission.REQUEST_INSTALL_PACKAGES
 import android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
-import android.content.res.Configuration
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Parcelable
+import android.widget.Toast
+import androidx.activity.result.ActivityResultCallback
 import androidx.activity.result.contract.ActivityResultContracts.GetContent
 import androidx.activity.result.contract.ActivityResultContracts.RequestPermission
 import androidx.appcompat.app.AppCompatActivity
+import com.topjohnwu.magisk.R
 import com.topjohnwu.magisk.core.isRunningAsStub
-import com.topjohnwu.magisk.core.utils.currentLocale
+import com.topjohnwu.magisk.core.utils.RequestInstall
 import com.topjohnwu.magisk.core.wrap
 import com.topjohnwu.magisk.ktx.reflectField
+import com.topjohnwu.magisk.utils.Utils
+
+interface ContentResultCallback: ActivityResultCallback<Uri>, Parcelable {
+    fun onActivityLaunch() {}
+    // Make the result type explicitly non-null
+    override fun onActivityResult(result: Uri)
+}
 
 abstract class BaseActivity : AppCompatActivity() {
 
@@ -22,21 +35,31 @@ abstract class BaseActivity : AppCompatActivity() {
         permissionCallback?.invoke(it)
         permissionCallback = null
     }
+    private val requestInstall = registerForActivityResult(RequestInstall()) {
+        permissionCallback?.invoke(it)
+        permissionCallback = null
+    }
 
-    private var contentCallback: ((Uri) -> Unit)? = null
+    private var contentCallback: ContentResultCallback? = null
     private val getContent = registerForActivityResult(GetContent()) {
-        if (it != null) contentCallback?.invoke(it)
+        if (it != null) contentCallback?.onActivityResult(it)
         contentCallback = null
     }
 
-    override fun applyOverrideConfiguration(config: Configuration?) {
-        // Force applying our preferred local
-        config?.setLocale(currentLocale)
-        super.applyOverrideConfiguration(config)
+    private val mReferrerField by lazy(LazyThreadSafetyMode.NONE) {
+        Activity::class.java.reflectField("mReferrer")
+    }
+
+    val realCallingPackage: String? get() {
+        callingPackage?.let { return it }
+        if (Build.VERSION.SDK_INT >= 22) {
+            mReferrerField.get(this)?.let { return it as String }
+        }
+        return null
     }
 
     override fun attachBaseContext(base: Context) {
-        super.attachBaseContext(base.wrap(true))
+        super.attachBaseContext(base.wrap())
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -47,7 +70,15 @@ abstract class BaseActivity : AppCompatActivity() {
             clz.reflectField("mActivityHandlesUiModeChecked").set(delegate, true)
             clz.reflectField("mActivityHandlesUiMode").set(delegate, false)
         }
+        contentCallback = savedInstanceState?.getParcelable(CONTENT_CALLBACK_KEY)
         super.onCreate(savedInstanceState)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        contentCallback?.let {
+            outState.putParcelable(CONTENT_CALLBACK_KEY, it)
+        }
     }
 
     fun withPermission(permission: String, callback: (Boolean) -> Unit) {
@@ -57,12 +88,21 @@ abstract class BaseActivity : AppCompatActivity() {
             return
         }
         permissionCallback = callback
-        requestPermission.launch(permission)
+        if (permission == REQUEST_INSTALL_PACKAGES) {
+            requestInstall.launch(Unit)
+        } else {
+            requestPermission.launch(permission)
+        }
     }
 
-    fun getContent(type: String, callback: (Uri) -> Unit) {
+    fun getContent(type: String, callback: ContentResultCallback) {
         contentCallback = callback
-        getContent.launch(type)
+        try {
+            getContent.launch(type)
+            callback.onActivityLaunch()
+        } catch (e: ActivityNotFoundException) {
+            Utils.toast(R.string.app_not_found, Toast.LENGTH_SHORT)
+        }
     }
 
     override fun recreate() {
@@ -73,5 +113,9 @@ abstract class BaseActivity : AppCompatActivity() {
     fun relaunch() {
         startActivity(Intent(intent).setFlags(0))
         finish()
+    }
+
+    companion object {
+        private const val CONTENT_CALLBACK_KEY = "content_callback"
     }
 }

@@ -5,11 +5,9 @@ plugins {
 setupCommon()
 
 android {
-    defaultConfig {
-        consumerProguardFiles("proguard-rules.pro")
-    }
+    namespace = "com.topjohnwu.shared"
 }
 
 dependencies {
-    api("io.michaelrocks:paranoid-core:0.3.5")
+    api("io.michaelrocks:paranoid-core:0.3.7")
 }

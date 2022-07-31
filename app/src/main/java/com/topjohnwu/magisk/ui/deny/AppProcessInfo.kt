@@ -38,7 +38,7 @@ class AppProcessInfo(
     }
 
     val label = info.getLabel(pm)
-    val iconImage: Drawable = info.loadIcon(pm)
+    val iconImage: Drawable = runCatching { info.loadIcon(pm) }.getOrDefault(pm.defaultActivityIcon)
     val packageName: String get() = info.packageName
     val processes = fetchProcesses(pm)
 
@@ -85,7 +85,7 @@ class AppProcessInfo(
             pm.getPackageArchiveInfo(info.sourceDir, flag) ?: return emptyList()
         }
 
-        val processSet = TreeSet<ProcessInfo>(compareBy{ it.name })
+        val processSet = TreeSet<ProcessInfo>(compareBy({ it.name }, { it.isIsolated }))
         processSet += packageInfo.activities.toProcessList()
         processSet += packageInfo.services.toProcessList()
         processSet += packageInfo.receivers.toProcessList()
@@ -106,6 +106,6 @@ data class ProcessInfo(
     val packageName: String,
     var isEnabled: Boolean
 ) {
-    val isIsolated get() = packageName == ISOLATED_MAGIC
-    val isAppZygote get() = name.endsWith("_zygote")
+    val isIsolated = packageName == ISOLATED_MAGIC
+    val isAppZygote = name.endsWith("_zygote")
 }

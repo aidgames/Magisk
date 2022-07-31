@@ -11,13 +11,11 @@ import com.topjohnwu.magisk.R
 import com.topjohnwu.magisk.arch.BaseViewModel
 import com.topjohnwu.magisk.core.Const
 import com.topjohnwu.magisk.core.Info
+import com.topjohnwu.magisk.core.di.AppContext
 import com.topjohnwu.magisk.core.isRunningAsStub
 import com.topjohnwu.magisk.core.tasks.HideAPK
-import com.topjohnwu.magisk.databinding.adapterOf
-import com.topjohnwu.magisk.databinding.itemBindingOf
-import com.topjohnwu.magisk.di.AppContext
+import com.topjohnwu.magisk.databinding.bindExtra
 import com.topjohnwu.magisk.events.AddHomeIconEvent
-import com.topjohnwu.magisk.events.RecreateEvent
 import com.topjohnwu.magisk.events.SnackbarEvent
 import com.topjohnwu.magisk.events.dialog.BiometricEvent
 import com.topjohnwu.magisk.ktx.activity
@@ -25,11 +23,12 @@ import com.topjohnwu.magisk.utils.Utils
 import com.topjohnwu.superuser.Shell
 import kotlinx.coroutines.launch
 
-class SettingsViewModel : BaseViewModel(), BaseSettingsItem.Callback {
+class SettingsViewModel : BaseViewModel(), BaseSettingsItem.Handler {
 
-    val adapter = adapterOf<BaseSettingsItem>()
-    val itemBinding = itemBindingOf<BaseSettingsItem> { it.bindExtra(BR.callback, this) }
     val items = createItems()
+    val extraBindings = bindExtra {
+        it.put(BR.handler, this)
+    }
 
     init {
         viewModelScope.launch {
@@ -52,15 +51,10 @@ class SettingsViewModel : BaseViewModel(), BaseSettingsItem.Callback {
         // Manager
         list.addAll(listOf(
             AppSettings,
-            UpdateChannel, UpdateChannelUrl, UpdateChecker, DownloadPath
+            UpdateChannel, UpdateChannelUrl, DoHToggle, UpdateChecker, DownloadPath
         ))
-        if (Info.env.isActive) {
-            if (Const.USER_ID == 0) {
-                if (hidden)
-                    list.add(Restore)
-                else if (Info.isConnected.get())
-                    list.add(Hide)
-            }
+        if (Build.VERSION.SDK_INT >= 22 && Info.env.isActive && Const.USER_ID == 0) {
+            if (hidden) list.add(Restore) else list.add(Hide)
         }
 
         // Magisk
@@ -69,7 +63,7 @@ class SettingsViewModel : BaseViewModel(), BaseSettingsItem.Callback {
                 Magisk,
                 SystemlessHosts
             ))
-            if (Const.Version.isCanary()) {
+            if (Const.Version.atLeast_24_0()) {
                 list.addAll(listOf(Zygisk, DenyList, DenyListConfig))
             }
         }
@@ -98,27 +92,25 @@ class SettingsViewModel : BaseViewModel(), BaseSettingsItem.Callback {
         return list
     }
 
-    override fun onItemPressed(view: View, item: BaseSettingsItem, callback: () -> Unit) {
+    override fun onItemPressed(view: View, item: BaseSettingsItem, andThen: () -> Unit) {
         when (item) {
-            is DownloadPath -> withExternalRW(callback)
-            is Biometrics -> authenticate(callback)
-            is Theme ->
-                SettingsFragmentDirections.actionSettingsFragmentToThemeFragment().navigate()
-            is DenyListConfig ->
-                SettingsFragmentDirections.actionSettingsFragmentToDenyFragment().navigate()
-            is SystemlessHosts -> createHosts()
-            is Restore -> HideAPK.restore(view.activity)
-            is AddShortcut -> AddHomeIconEvent().publish()
-            else -> callback()
+            DownloadPath -> withExternalRW(andThen)
+            Biometrics -> authenticate(andThen)
+            Theme -> SettingsFragmentDirections.actionSettingsFragmentToThemeFragment().navigate()
+            DenyListConfig -> SettingsFragmentDirections.actionSettingsFragmentToDenyFragment().navigate()
+            SystemlessHosts -> createHosts()
+            Hide, Restore -> withInstallPermission(andThen)
+            AddShortcut -> AddHomeIconEvent().publish()
+            else -> andThen()
         }
     }
 
-    override fun onItemChanged(view: View, item: BaseSettingsItem) {
+    override fun onItemAction(view: View, item: BaseSettingsItem) {
         when (item) {
-            is Language -> RecreateEvent().publish()
-            is UpdateChannel -> openUrlIfNecessary(view)
+            UpdateChannel -> openUrlIfNecessary(view)
             is Hide -> viewModelScope.launch { HideAPK.hide(view.activity, item.value) }
-            is Zygisk -> if (Zygisk.mismatch) SnackbarEvent(R.string.reboot_apply_change).publish()
+            Restore -> viewModelScope.launch { HideAPK.restore(view.activity) }
+            Zygisk -> if (Zygisk.mismatch) SnackbarEvent(R.string.reboot_apply_change).publish()
             else -> Unit
         }
     }
@@ -138,7 +130,7 @@ class SettingsViewModel : BaseViewModel(), BaseSettingsItem.Callback {
     }
 
     private fun createHosts() {
-        Shell.su("add_hosts_module").submit {
+        Shell.cmd("add_hosts_module").submit {
             Utils.toast(R.string.settings_hosts_toast, Toast.LENGTH_SHORT)
         }
     }

@@ -295,6 +295,13 @@ mount_partitions() {
 
   # Allow /system/bin commands (dalvikvm) on Android 10+ in recovery
   $BOOTMODE || mount_apex
+
+  # Mount sepolicy rules dir locations in recovery (best effort)
+  if ! $BOOTMODE; then
+    mount_name "cache cac" /cache
+    mount_name metadata /metadata
+    mount_name persist /persist
+  fi
 }
 
 # loop_setup <ext4_img>, sets LOOPDEV
@@ -377,12 +384,14 @@ umount_apex() {
   unset BOOTCLASSPATH
 }
 
+# After calling this method, the following variables will be set:
+# KEEPVERITY, KEEPFORCEENCRYPT, RECOVERYMODE, PATCHVBMETAFLAG,
+# ISENCRYPTED, VBMETAEXIST
 get_flags() {
-  # override variables
   getvar KEEPVERITY
   getvar KEEPFORCEENCRYPT
   getvar RECOVERYMODE
-  getvar KEEPVBMETAFLAG
+  getvar PATCHVBMETAFLAG
   if [ -z $KEEPVERITY ]; then
     if $SYSTEM_ROOT; then
       KEEPVERITY=true
@@ -403,22 +412,32 @@ get_flags() {
       KEEPFORCEENCRYPT=false
     fi
   fi
-  [ -z $KEEPVBMETAFLAG ] && KEEPVBMETAFLAG=false
+  VBMETAEXIST=false
+  local VBMETAIMG=$(find_block vbmeta vbmeta_a)
+  [ -n "$VBMETAIMG" ] && VBMETAEXIST=true
+  if [ -z $PATCHVBMETAFLAG ]; then
+    if $VBMETAEXIST; then
+      PATCHVBMETAFLAG=false
+    else
+      PATCHVBMETAFLAG=true
+      ui_print "- No vbmeta partition, patch vbmeta in boot image"
+    fi
+  fi
   [ -z $RECOVERYMODE ] && RECOVERYMODE=false
 }
 
 find_boot_image() {
   BOOTIMAGE=
   if $RECOVERYMODE; then
-    BOOTIMAGE=`find_block recovery_ramdisk$SLOT recovery$SLOT sos`
+    BOOTIMAGE=$(find_block "recovery_ramdisk$SLOT" "recovery$SLOT" "sos")
   elif [ ! -z $SLOT ]; then
-    BOOTIMAGE=`find_block ramdisk$SLOT recovery_ramdisk$SLOT boot$SLOT`
+    BOOTIMAGE=$(find_block "ramdisk$SLOT" "recovery_ramdisk$SLOT" "init_boot$SLOT" "boot$SLOT")
   else
-    BOOTIMAGE=`find_block ramdisk recovery_ramdisk kern-a android_boot kernel bootimg boot lnx boot_a`
+    BOOTIMAGE=$(find_block ramdisk recovery_ramdisk kern-a android_boot kernel bootimg init_boot boot lnx boot_a)
   fi
   if [ -z $BOOTIMAGE ]; then
     # Lets see what fstabs tells me
-    BOOTIMAGE=`grep -v '#' /etc/*fstab* | grep -E '/boot(img)?[^a-zA-Z]' | grep -oE '/dev/[a-zA-Z0-9_./-]*' | head -n 1`
+    BOOTIMAGE=$(grep -v '#' /etc/*fstab* | grep -E '/boot(img)?[^a-zA-Z]' | grep -oE '/dev/[a-zA-Z0-9_./-]*' | head -n 1)
   fi
 }
 
@@ -565,16 +584,13 @@ check_data() {
 
 find_magisk_apk() {
   local DBAPK
-  [ -z $APK ] && APK=$NVBASE/magisk.apk
-  [ -f $APK ] || APK=$MAGISKBIN/magisk.apk
-  [ -f $APK ] || APK=/data/app/com.topjohnwu.magisk*/*.apk
-  [ -f $APK ] || APK=/data/app/*/com.topjohnwu.magisk*/*.apk
+  [ -z $APK ] && APK=/data/app/com.topjohnwu.magisk*/base.apk
+  [ -f $APK ] || APK=/data/app/*/com.topjohnwu.magisk*/base.apk
   if [ ! -f $APK ]; then
     DBAPK=$(magisk --sqlite "SELECT value FROM strings WHERE key='requester'" 2>/dev/null | cut -d= -f2)
     [ -z $DBAPK ] && DBAPK=$(strings $NVBASE/magisk.db | grep -oE 'requester..*' | cut -c10-)
-    [ -z $DBAPK ] || APK=/data/user_de/*/$DBAPK/dyn/*.apk
-    [ -f $APK ] || [ -z $DBAPK ] || APK=/data/app/$DBAPK*/*.apk
-    [ -f $APK ] || [ -z $DBAPK ] || APK=/data/app/*/$DBAPK*/*.apk
+    [ -z $DBAPK ] || APK=/data/user_de/0/$DBAPK/dyn/current.apk
+    [ -f $APK ] || [ -z $DBAPK ] || APK=/data/data/$DBAPK/dyn/current.apk
   fi
   [ -f $APK ] || ui_print "! Unable to detect Magisk app APK for BootSigner"
 }
@@ -628,13 +644,13 @@ copy_sepolicy_rules() {
     RULESDIR=$NVBASE/modules
   elif [ -d /data/unencrypted ] && ! grep ' /data ' /proc/mounts | grep -qE 'dm-|f2fs'; then
     RULESDIR=/data/unencrypted/magisk
-  elif grep -q ' /cache ' /proc/mounts; then
+  elif grep ' /cache ' /proc/mounts | grep -q 'ext4' ; then
     RULESDIR=/cache/magisk
-  elif grep -q ' /metadata ' /proc/mounts; then
+  elif grep ' /metadata ' /proc/mounts | grep -q 'ext4' ; then
     RULESDIR=/metadata/magisk
-  elif grep -q ' /persist ' /proc/mounts; then
+  elif grep ' /persist ' /proc/mounts | grep -q 'ext4' ; then
     RULESDIR=/persist/magisk
-  elif grep -q ' /mnt/vendor/persist ' /proc/mounts; then
+  elif grep ' /mnt/vendor/persist ' /proc/mounts | grep -q 'ext4' ; then
     RULESDIR=/mnt/vendor/persist/magisk
   else
     ui_print "- Unable to find sepolicy rules dir"
@@ -642,9 +658,9 @@ copy_sepolicy_rules() {
   fi
 
   if [ -d ${RULESDIR%/magisk} ]; then
-    ui_print "- Sepolicy rules dir is ${RULESDIR%/magisk}"
+    echo "RULESDIR=$RULESDIR" >&2
   else
-    ui_print "- Sepolicy rules dir ${RULESDIR%/magisk} not found"
+    ui_print "- Unable to find sepolicy rules dir ${RULESDIR%/magisk}"
     return 1
   fi
 
@@ -707,6 +723,7 @@ is_legacy_script() {
 install_module() {
   rm -rf $TMPDIR
   mkdir -p $TMPDIR
+  chcon u:object_r:system_file:s0 $TMPDIR
   cd $TMPDIR
 
   setup_flashable
@@ -801,7 +818,7 @@ install_module() {
   rm -rf \
   $MODPATH/system/placeholder $MODPATH/customize.sh \
   $MODPATH/README.md $MODPATH/.git*
-  rmdir -p $MODPATH
+  rmdir -p $MODPATH 2>/dev/null
 
   cd /
   $BOOTMODE || recovery_cleanup
@@ -823,7 +840,7 @@ NVBASE=/data/adb
 TMPDIR=/dev/tmp
 
 # Bootsigner related stuff
-BOOTSIGNERCLASS=com.topjohnwu.signing.SignBoot
+BOOTSIGNERCLASS=com.topjohnwu.magisk.signing.SignBoot
 BOOTSIGNER='/system/bin/dalvikvm -Xnoimage-dex2oat -cp $APK $BOOTSIGNERCLASS'
 BOOTSIGNED=false
 

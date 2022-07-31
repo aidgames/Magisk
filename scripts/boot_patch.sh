@@ -70,11 +70,11 @@ fi
 # Flags
 [ -z $KEEPVERITY ] && KEEPVERITY=false
 [ -z $KEEPFORCEENCRYPT ] && KEEPFORCEENCRYPT=false
-[ -z $KEEPVBMETAFLAG ] && KEEPVBMETAFLAG=false
+[ -z $PATCHVBMETAFLAG ] && PATCHVBMETAFLAG=false
 [ -z $RECOVERYMODE ] && RECOVERYMODE=false
 export KEEPVERITY
 export KEEPFORCEENCRYPT
-export KEEPVBMETAFLAG
+export PATCHVBMETAFLAG
 
 chmod -R 755 .
 
@@ -101,8 +101,6 @@ case $? in
     ;;
 esac
 
-[ -f recovery_dtbo ] && RECOVERYMODE=true
-
 ###################
 # Ramdisk Restores
 ###################
@@ -113,7 +111,7 @@ if [ -e ramdisk.cpio ]; then
   ./magiskboot cpio ramdisk.cpio test
   STATUS=$?
 else
-  # Stock A only system-as-root
+  # Stock A only legacy SAR, or some Android 13 GKIs
   STATUS=0
 fi
 case $((STATUS & 3)) in
@@ -151,7 +149,7 @@ ui_print "- Patching ramdisk"
 
 echo "KEEPVERITY=$KEEPVERITY" > config
 echo "KEEPFORCEENCRYPT=$KEEPFORCEENCRYPT" >> config
-echo "KEEPVBMETAFLAG=$KEEPVBMETAFLAG" >> config
+echo "PATCHVBMETAFLAG=$PATCHVBMETAFLAG" >> config
 echo "RECOVERYMODE=$RECOVERYMODE" >> config
 [ ! -z $SHA1 ] && echo "SHA1=$SHA1" >> config
 
@@ -185,7 +183,15 @@ rm -f ramdisk.cpio.orig config magisk*.xz
 #################
 
 for dt in dtb kernel_dtb extra; do
-  [ -f $dt ] && ./magiskboot dtb $dt patch && ui_print "- Patch fstab in $dt"
+  if [ -f $dt ]; then
+    if ! ./magiskboot dtb $dt test; then
+      ui_print "! Boot image $dt was patched by old (unsupported) Magisk"
+      abort "! Please try again with *unpatched* boot image"
+    fi
+    if ./magiskboot dtb $dt patch; then
+      ui_print "- Patch fstab in boot image $dt"
+    fi
+  fi
 done
 
 if [ -f kernel ]; then
